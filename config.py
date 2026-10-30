@@ -13,6 +13,13 @@ API_ID = int(_req("API_ID"))
 API_HASH = _req("API_HASH")
 BOT_TOKEN = _req("BOT_TOKEN")
 OWNER_ID = int(_req("OWNER_ID"))
-MONGO_URL = _req("MONGO_URL")
+MONGO_URL = (
+    os.getenv("MONGO_URL")
+    or os.getenv("MONGO_DB_URI")
+    or os.getenv("MONGODB_URL")
+    or os.getenv("MONGO_URI")
+)
+if not MONGO_URL:
+    raise SystemExit("❌ Missing environment variable: MONGO_URL")
 DB_NAME = os.getenv("DB_NAME", "kukudb")
 SESSION = "kuku"
