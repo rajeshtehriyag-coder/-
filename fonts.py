@@ -54,13 +54,25 @@ def f(text: str, font: str) -> str:
     return text.translate(t) if t else text
 
 
+_SKIP = {"a", "code", "pre"}
+_TAG_NAME = re.compile(r"<(/?)(\w+)")
+
+
 def f_html(html_text: str, font: str) -> str:
-    """Apply font to HTML text without touching tags/entities (keeps premium emoji intact)."""
+    """Apply font to HTML text, but never inside links/code/tags (links stay clickable)."""
     t = _TABLES.get(font)
     if not t:
         return html_text
-    parts = _TOKEN.split(html_text)
-    return "".join(p if i % 2 else p.translate(t) for i, p in enumerate(parts))
+    out, skip = [], 0
+    for i, p in enumerate(_TOKEN.split(html_text)):
+        if i % 2:  # tag or entity
+            mm = _TAG_NAME.match(p)
+            if mm and mm.group(2).lower() in _SKIP:
+                skip = max(skip + (-1 if mm.group(1) else 1), 0)
+            out.append(p)
+        else:
+            out.append(p if skip else p.translate(t))
+    return "".join(out)
 
 
 def S(text: str) -> str:
