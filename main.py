@@ -84,6 +84,7 @@ GROUP_F = F.chat.type.in_({"group", "supergroup"})
 PRIVATE_F = F.chat.type == "private"
 START_TIME = time.time()
 MASTER: Bot = None
+MASTER_UN = ""
 CTX = {}   # bot_id -> {"master": bool, "owner_id": int, "username": str}
 RT = {}    # clone bot_id -> {"bot", "dp", "task"}
 RUN = {}   # (bot_id, chat_id) -> tagging state
@@ -343,6 +344,14 @@ def K(rows):
     return InlineKeyboardMarkup(inline_keyboard=rows)
 
 
+def clone_url():
+    return f"https://t.me/{MASTER_UN}?start=clone"
+
+
+def clone_kb():
+    return K([[B("🤖 Create Your Own Bot (Clone)", url=clone_url())]])
+
+
 _PREFIX = re.compile(r"(?is)^\s*(/\w+(@\w+)?|@all|all|@admins?)(\s+|$)")
 
 
@@ -477,6 +486,7 @@ async def home_markup(bot):
     rows = [[B("➕ Add Me To Group", url=f"https://t.me/{uname}?startgroup=true&admin=invite_users+delete_messages")]]
     own = links.get("owner") or {"url": f"tg://user?id={CTX[bot.id]['owner_id']}", "name": "👑 Owner"}
     rows.append([B("📖 Guide", "hp:help"), B(own["name"], url=own["url"])])
+    rows.append([B("🤖 Create Your Own Bot (Clone)", url=clone_url())])
     sup = [B(v["name"], url=v["url"]) for k, v in sorted(links.items(), key=lambda x: int(x[0]) if x[0].isdigit() else 0) if k != "owner"]
     rows += [sup[i:i + 2] for i in range(0, len(sup), 2)]
     return K(rows)
@@ -518,14 +528,23 @@ async def _log_new_user(bot, u):
                    f"• ID: <code>{u.id}</code>\n• Time: {now_str()}\n• Total users: <b>{total}</b>{via}")
 
 
+CLONE_GUIDE = ("🤖 <b>Apna khud ka Tag Bot banao (Clone)</b>\n\n1. @BotFather me <code>/newbot</code> se naya bot banao\n"
+               "2. Uska token yaha bhejo: <code>/clone TOKEN</code>\n3. @BotFather me <code>/setprivacy</code> → Disable karo\n"
+               "4. Apne bot ko group me admin banao\n\n🔒 Token turant delete hoke encrypted save hota hai.\n"
+               "Control: /myclones /stopclone /startclone /deleteclone")
+
+
 @on("message", Command("start"))
-async def start_cmd(message: Message, bot: Bot):
+async def start_cmd(message: Message, bot: Bot, command: CommandObject):
     u = message.from_user
     if not u:
         return
     if message.chat.type == ChatType.PRIVATE:
         isnew = await reg_user(bot.id, u)
-        await send_home(bot, message.chat.id, u)
+        if command.args == "clone" and is_master(bot):
+            await message.answer(CLONE_GUIDE)
+        else:
+            await send_home(bot, message.chat.id, u)
         if isnew:
             asyncio.create_task(_log_new_user(bot, u))
     else:
@@ -909,14 +928,15 @@ async def welcome(message: Message, bot: Bot):
             count = "?"
         body = (f"👤 {S('name')}  ›  {ulink(u)}\n🆔 {S('id')}  ›  <code>{u.id}</code>\n"
                 f"🔗 {S('username')}  ›  {'@' + u.username if u.username else S('none')}\n"
-                f"🏠 {S('group')}  ›  <b>{esc(chat.title)}</b>\n👥 {S('members')}  ›  <b>{count}</b>")
+                f"🏠 {S('group')}  ›  <b>{esc(chat.title)}</b>\n👥 {S('members')}  ›  <b>{count}</b>\n\n"
+                f"🤖 {S('want your own tag bot? make a clone below')}")
         cap = wrap("neon", S("welcome"), body)
         try:
             data = await group_photo(bot, chat.id)
             if data:
-                await bot.send_photo(chat.id, BufferedInputFile(data, "group.jpg"), caption=cap)
+                await bot.send_photo(chat.id, BufferedInputFile(data, "group.jpg"), caption=cap, reply_markup=clone_kb())
             else:
-                await bot.send_message(chat.id, cap)
+                await bot.send_message(chat.id, cap, reply_markup=clone_kb())
         except TelegramRetryAfter as e:
             await asyncio.sleep(e.retry_after)
         except TelegramAPIError as e:
@@ -959,7 +979,7 @@ async def bot_status(ev: ChatMemberUpdated, bot: Bot):
                        f"• Time: {now_str()}\n• Total groups: <b>{total}</b>{via}")
         with contextlib.suppress(TelegramAPIError):
             await bot.send_message(chat.id, wrap("neon", S("thanks for adding me"),
-                f"⚡ <b>{S('kuku tag bot')}</b> {S('is ready')}!\n\n🛡 {S('make me admin to tag everyone')}\n⚙️ /settings  •  📖 /start"))
+                f"⚡ <b>{S('kuku tag bot')}</b> {S('is ready')}!\n\n🛡 {S('make me admin to tag everyone')}\n⚙️ /settings  •  📖 /start"), reply_markup=clone_kb())
     elif new in (ChatMemberStatus.LEFT, ChatMemberStatus.KICKED):
         await db.groups.update_one({"bot_id": bot.id, "chat_id": chat.id}, {"$set": {"active": False}})
         await send_log(f"➖ <b>Bot Removed From Group</b>\n\n• Group: <b>{esc(chat.title)}</b>\n• ID: <code>{chat.id}</code>\n"
@@ -1427,7 +1447,7 @@ async def clone_cmd(message: Message, bot: Bot, command: CommandObject):
     u = message.from_user
     token = (command.args or "").strip()
     if not token:
-        return await message.answer("🤖 <b>Apna bot clone karo</b>\n\n1. @BotFather me <code>/newbot</code> se bot banao\n2. Token yaha bhejo: <code>/clone TOKEN</code>\n\n🔒 Token turant delete hoke encrypted save hota hai.")
+        return await message.answer(CLONE_GUIDE)
     with contextlib.suppress(TelegramAPIError):
         await message.delete()  # token must not stay in chat
     if not re.fullmatch(r"\d{6,12}:[A-Za-z0-9_-]{30,}", token):
@@ -1567,10 +1587,11 @@ async def boot_clones():
 
 
 async def main():
-    global MASTER
+    global MASTER, MASTER_UN
     await init_db()
     MASTER = Bot(BOT_TOKEN, default=DEFAULT)
     me = await MASTER.get_me()
+    MASTER_UN = me.username
     CTX[me.id] = {"master": True, "owner_id": OWNER_ID, "username": me.username}
     await db.tag_sessions.update_many({"status": "running"}, {"$set": {"status": "interrupted"}})  # no duplicate resume after restart
     dp = build_dispatcher()
