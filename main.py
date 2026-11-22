@@ -34,6 +34,7 @@ from aiogram.types import (
 )
 from cryptography.fernet import Fernet, InvalidToken
 from motor.motor_asyncio import AsyncIOMotorClient
+from pymongo import UpdateOne
 
 # ═══════════════════════════ CONFIG ═══════════════════════════
 def env(*names, default=None, required=False):
@@ -51,6 +52,8 @@ OWNER_ID = int(env("OWNER_ID", required=True))
 MONGO_URI = env("MONGO_DB_URI", "MONGO_URL", "MONGODB_URL", "MONGO_URI", required=True)
 DB_NAME = env("DATABASE_NAME", "DB_NAME", default="kukuv3")
 ENC_KEY = env("ENCRYPTION_KEY", required=True)
+API_ID = int(env("API_ID", default="0"))
+API_HASH = env("API_HASH", default="")
 TZ = ZoneInfo(env("TIMEZONE", default="Asia/Kolkata"))
 LOG_GROUP_ID = int(env("LOG_GROUP_ID", default="0"))
 MAX_CLONES = int(env("MAX_CLONES_PER_USER", default="3"))
@@ -253,6 +256,64 @@ async def db_members(bid, cid):
     q = {"bot_id": bid, "chat_id": cid, "left": {"$ne": True}, "opt_out": {"$ne": True}}
     return [{"id": d["user_id"], "name": d.get("name"), "username": d.get("username")}
             async for d in db.members.find(q).sort("last_seen", -1)]
+
+
+# ---- MTProto helper (API ID + Hash): fetches the FULL member list ----
+MT = {}
+_mt_lock = asyncio.Lock()
+_MT_RANK = {"ONLINE": 0, "RECENTLY": 1, "LAST_WEEK": 2, "LAST_MONTH": 3, "LONG_AGO": 4}
+
+
+async def get_mt(bot):
+    if not (API_ID and API_HASH):
+        return None
+    if bot.id in MT:
+        return MT[bot.id]
+    async with _mt_lock:
+        if bot.id in MT:
+            return MT[bot.id]
+        try:
+            from pyrogram import Client as PyroClient
+            cl = PyroClient(f"mt{bot.id}", api_id=API_ID, api_hash=API_HASH, bot_token=bot.token, in_memory=True, no_updates=True)
+            await cl.start()
+            MT[bot.id] = cl
+            return cl
+        except Exception as e:
+            log.warning("MTProto helper failed: %s", e)
+            return None
+
+
+async def stop_mt(bid):
+    cl = MT.pop(bid, None)
+    if cl:
+        with contextlib.suppress(Exception):
+            await cl.stop()
+
+
+async def mt_members(bot, cid):
+    """All real members via MTProto. Returns None if unavailable (caller falls back to DB)."""
+    cl = await get_mt(bot)
+    if not cl:
+        return None
+    out = []
+    try:
+        async for m in cl.get_chat_members(cid):
+            u = m.user
+            if u and not u.is_bot and not u.is_deleted:
+                st = getattr(u.status, "name", "")
+                out.append({"id": u.id, "name": u.first_name or "User", "username": u.username, "rank": _MT_RANK.get(st, 5)})
+    except Exception as e:
+        log.warning("mt_members failed: %s", e)
+        return None
+    if not out:
+        return None
+    opt = {d["user_id"] async for d in db.members.find({"bot_id": bot.id, "chat_id": cid, "opt_out": True}, {"user_id": 1})}
+    ops = [UpdateOne({"bot_id": bot.id, "chat_id": cid, "user_id": m["id"]},
+                     {"$set": {"name": m["name"], "username": m["username"], "left": False, "last_seen": time.time()}}, upsert=True) for m in out]
+    for i in range(0, len(ops), 1000):
+        with contextlib.suppress(Exception):
+            await db.members.bulk_write(ops[i:i + 1000], ordered=False)
+    return [m for m in out if m["id"] not in opt]
 
 
 async def is_banned(bid, tid):
@@ -752,7 +813,14 @@ async def start_tag(bot, message, mode, silent=False):
     await reg_group(bid, message.chat)
     await sync_admins(bot, cid)
     custom = strip_cmd(message.html_text)
-    members = await (admin_members(bot, cid) if mode == "admins" else db_members(bid, cid))
+    if mode == "admins":
+        members = await admin_members(bot, cid)
+    else:
+        members = await mt_members(bot, cid)
+        if members is None:  # no API ID/Hash or failed -> use remembered members
+            members = await db_members(bid, cid)
+    if mode == "vctag":
+        members.sort(key=lambda m: m.get("rank", 5))  # online first
     if mode == "anybody" and members:
         members = [random.choice(members)]
     if cfg["limit"] and mode != "anybody":
@@ -1415,6 +1483,7 @@ async def start_clone(doc):
 async def stop_clone(bid):
     rt = RT.pop(bid, None)
     CTX.pop(bid, None)
+    await stop_mt(bid)
     if not rt:
         return
     with contextlib.suppress(Exception):
@@ -1604,6 +1673,7 @@ async def main():
     finally:
         for bid in list(RT):
             await stop_clone(bid)
+        await stop_mt(MASTER.id)
         await MASTER.session.close()
 
 
