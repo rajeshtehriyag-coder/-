@@ -3,3 +3,4 @@ motor>=3.5
 cryptography>=42
 pyrofork
 tgcrypto
+Pillow>=10.1
