@@ -8,6 +8,7 @@ import asyncio
 import base64
 import contextlib
 import hashlib
+import io
 import html
 import logging
 import os
@@ -16,6 +17,7 @@ import re
 import sys
 import time
 from collections import OrderedDict
+from contextvars import ContextVar
 from datetime import datetime
 from zoneinfo import ZoneInfo
 
@@ -109,8 +111,8 @@ def ulink(u):
 
 # ═══════════════════════════ FONTS & THEMES ═══════════════════════════
 FONT_NAMES = {"normal": "Normal", "bold": "𝗕𝗼𝗹𝗱", "italic": "𝙄𝙩𝙖𝙡𝙞𝙘", "script": "𝓢𝓬𝓻𝓲𝓹𝓽", "small": "ꜱᴍᴀʟʟ ᴄᴀᴘꜱ", "double": "𝔻𝕠𝕦𝕓𝕝𝕖"}
-THEME_NAMES = {"neon": "💠 Neon", "premium": "👑 Premium", "dark": "🌑 Dark Box", "minimal": "▫️ Minimal", "default": "✨ Default"}
-BULLET = {"neon": "💠", "premium": "✦", "dark": "▸", "minimal": "•", "default": "•"}
+THEME_NAMES = {"simple": "🟢 Simple (default)", "neon": "💠 Neon", "premium": "👑 Premium", "dark": "🌑 Dark Box", "minimal": "▫️ Minimal", "default": "✨ Default"}
+BULLET = {"simple": "", "neon": "💠", "premium": "✦", "dark": "▸", "minimal": "•", "default": "•"}
 
 
 def _mk(up, lo, exc=None):
@@ -165,10 +167,19 @@ def S(text):
     return text.translate(_TABLES["small"])
 
 
+NAME = ContextVar("bot_name", default="Kuku Tag Bot")
+
+
+def bn():
+    return NAME.get()
+
+
 def wrap(theme, title, body):
+    if theme == "simple":
+        return body
     if theme == "neon":
         bar = "▰▱" * 7
-        return f"<b>⚡ ⟦ {title} ⟧ ⚡</b>\n<b>{bar}</b>\n\n{body}\n\n<b>{bar}</b>\n💠 <i>{S('kuku tag bot')}</i> 💠"
+        return f"<b>⚡ ⟦ {title} ⟧ ⚡</b>\n<b>{bar}</b>\n\n{body}\n\n<b>{bar}</b>\n💠 <i>{esc(S(bn()))}</i> 💠"
     if theme == "premium":
         return f"✦ ━━━━ ✦ <b>{title}</b> ✦ ━━━━ ✦\n\n{body}\n\n✦ ━━━━━━━━━━━━━━ ✦"
     if theme == "dark":
@@ -180,7 +191,7 @@ def wrap(theme, title, body):
 
 # ═══════════════════════════ DATABASE ═══════════════════════════
 db = None
-DEFAULTS = dict(style="mention", per=5, limit=0, font="bold", theme="neon", who_all="staff", who_tagall="staff", welcome=True, left=True)
+DEFAULTS = dict(style="mention", per=5, limit=0, font="normal", theme="simple", who_all="staff", who_tagall="staff", welcome=True, left=True, welcome_img="card")
 _cfg, _bans, _sup = {}, {}, {}
 _seen_groups, _mseen, _pcache, _gphoto, _role, _admsync = set(), {}, {}, {}, {}, {}
 
@@ -497,6 +508,8 @@ class Guard:
     async def __call__(self, handler, event, data):
         bot = data["bot"]
         c = CTX.get(bot.id)
+        if c:
+            NAME.set(c.get("name") or "Kuku")
         if not c or not isinstance(event, Message):
             return await handler(event, data) if c else None
         u = event.from_user
@@ -521,10 +534,20 @@ async def on_error(event: ErrorEvent):
     return True
 
 
+class NameMW:
+    async def __call__(self, handler, event, data):
+        c = CTX.get(data["bot"].id)
+        if c:
+            NAME.set(c.get("name") or "Kuku")
+        return await handler(event, data)
+
+
 def build_dispatcher():
     dp, r = Dispatcher(), Router()
     mw = Guard()
     r.message.outer_middleware(mw)
+    r.callback_query.outer_middleware(NameMW())
+    r.my_chat_member.outer_middleware(NameMW())
     for ev, flt, fn in _REG:
         getattr(r, ev).register(fn, *flt)
     dp.include_router(r)
@@ -538,10 +561,10 @@ def home_caption(u):
             f"✨ <b>{S('premium tagging bot for telegram')}</b>\n💠 {S('tag everyone in style')}\n"
             f"💠 {S('fonts, themes and emoji styles')}\n💠 {S('welcome with group dp')}\n\n"
             f"🛡 {S('add me to your group and make me admin')}")
-    return wrap("neon", S("kuku"), body)
+    return wrap("neon", esc(S(bn())), body)
 
 
-async def home_markup(bot):
+async def home_markup(bot, uid=0):
     uname = CTX[bot.id]["username"]
     links = await get_meta_links(bot.id)
     rows = [[B("➕ Add Me To Group", url=f"https://t.me/{uname}?startgroup=true&admin=invite_users+delete_messages")]]
@@ -550,12 +573,14 @@ async def home_markup(bot):
     rows.append([B("🤖 Create Your Own Bot (Clone)", url=clone_url())])
     sup = [B(v["name"], url=v["url"]) for k, v in sorted(links.items(), key=lambda x: int(x[0]) if x[0].isdigit() else 0) if k != "owner"]
     rows += [sup[i:i + 2] for i in range(0, len(sup), 2)]
+    if uid and is_owner(bot, uid):
+        rows.append([B("🛠 Owner Panel", "pn:home")])
     return K(rows)
 
 
 async def send_home(bot, chat_id, user):
     cap = home_caption(user)
-    kb = await home_markup(bot)
+    kb = await home_markup(bot, user.id)
     fid = await user_photo_id(bot, user.id)
     if fid:
         try:
@@ -573,7 +598,7 @@ def help_text(bot, uid):
     if is_master(bot):
         t += "\n\n🤖 <b>Clone</b>\n• /clone [token] • /myclones\n• /stopclone • /startclone • /deleteclone"
     if is_owner(bot, uid):
-        t += ("\n\n👑 <b>Owner</b>\n• /stats • /broadcast • /gcast • /bclog\n• /ban • /unban • /groups • /ping\n"
+        t += ("\n\n👑 <b>Owner</b>\n• /panel • /stats • /broadcast • /gcast • /bclog\n• /ban • /unban • /groups • /ping\n"
               "• /setsupport [n] • /delsupport n • /supports • /setowner")
     if is_master(bot) and (uid == OWNER_ID or uid in SUDO):
         t += "\n\n🛡 <b>Master</b>\n• /ucast • /clonelist\n• /disableclone • /enableclone • /delclone"
@@ -711,7 +736,7 @@ def progress(done, total, state):
 def build(cfg, mode, text_fn, batch):
     style, theme, font = cfg["style"], cfg["theme"], cfg["font"]
     ments = [mention(m, style) for m in batch]
-    mline = " ".join(ments) if style == "emoji" else "\n".join(f"{BULLET.get(theme, '•')} {x}" for x in ments)
+    mline = " ".join(ments) if (style == "emoji" or theme == "simple") else "\n".join(f"{BULLET.get(theme, '•')} {x}" for x in ments)
     text = text_fn()
     body = (f_html(text, font) + "\n\n" if text else "") + mline
     return wrap(theme, f(TITLES[mode], font), body)
@@ -903,6 +928,7 @@ SCHEMA = {
     "theme": ("🌈 Theme", list(THEME_NAMES.items())),
     "who_all": ("👑 /all Access", WHO),
     "who_tagall": ("😂 /tagall Access", WHO),
+    "welcome_img": ("🖼 Welcome Image", [("card", "🖼 Kuku Card"), ("anime", "🎌 Random Anime"), ("gdp", "🏠 Group DP"), ("none", "🚫 Text only")]),
 }
 
 
@@ -916,14 +942,15 @@ def main_text(cfg):
             f"🎯 {S('limit')}  ›  <b>{label('limit', cfg['limit'])}</b>", f"🔠 {S('font')}  ›  <b>{label('font', cfg['font'])}</b>",
             f"🌈 {S('theme')}  ›  <b>{label('theme', cfg['theme'])}</b>", f"👑 /all  ›  <b>{label('who_all', cfg['who_all'])}</b>",
             f"😂 /tagall  ›  <b>{label('who_tagall', cfg['who_tagall'])}</b>",
+            f"🖼 {S('welcome image')}  ›  <b>{label('welcome_img', cfg['welcome_img'])}</b>",
             f"👋 {S('welcome')}  ›  <b>{oo(cfg['welcome'])}</b>   🚪 {S('left')}  ›  <b>{oo(cfg['left'])}</b>"]
-    return wrap("neon", S("kuku settings"), "\n".join(rows))
+    return wrap("neon", S("settings"), "\n".join(rows))
 
 
 def kb_main(cfg):
     dot = lambda v: "🟢" if v else "🔴"  # noqa: E731
     return K([[B("🎨 Style", "st:menu:style"), B("📦 Per Msg", "st:menu:per")], [B("🎯 Limit", "st:menu:limit"), B("🔠 Font", "st:menu:font")],
-              [B("🌈 Theme", "st:menu:theme"), B("👑 /all Access", "st:menu:who_all")], [B("😂 /tagall Access", "st:menu:who_tagall")],
+              [B("🌈 Theme", "st:menu:theme"), B("👑 /all Access", "st:menu:who_all")], [B("😂 /tagall Access", "st:menu:who_tagall"), B("🖼 Welcome Image", "st:menu:welcome_img")],
               [B(f"{dot(cfg['welcome'])} Welcome", "st:tog:welcome"), B(f"{dot(cfg['left'])} Left", "st:tog:left")], [B("✖️ Close", "st:close")]])
 
 
@@ -937,8 +964,14 @@ def kb_menu(cfg, key):
 
 
 async def show(q, text, markup):
+    m = q.message
+    if m.photo or m.animation:
+        with contextlib.suppress(TelegramAPIError):
+            await m.delete()
+        await q.bot.send_message(m.chat.id, text, reply_markup=markup)
+        return
     with contextlib.suppress(TelegramBadRequest):
-        await q.message.edit_text(text, reply_markup=markup)
+        await m.edit_text(text, reply_markup=markup)
 
 
 @on("message", Command("settings"))
@@ -981,6 +1014,79 @@ async def settings_cb(q: CallbackQuery, bot: Bot):
 
 
 # ═══════════════════════════ WELCOME / LEFT / BOT ADDED-REMOVED ═══════════════════════════
+ANIME_CATS = ["waifu", "neko", "shinobu", "megumin", "smile", "happy", "wave", "blush", "dance", "wink", "pat", "hug", "highfive", "handhold", "cuddle", "awoo", "smug"]
+
+
+def ascii_name(text, fallback, n=18):
+    t = "".join(ch for ch in (text or "") if ch.isascii() and (ch.isalnum() or ch in " ._-@")).strip()
+    return t[:n] if len(t) >= 2 else fallback
+
+
+async def anime_url():
+    """Random SFW anime image/gif from a public API (many thousands of images)."""
+    try:
+        import aiohttp
+        async with aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=6)) as ses:
+            async with ses.get(f"https://api.waifu.pics/sfw/{random.choice(ANIME_CATS)}") as r:
+                return (await r.json()).get("url")
+    except Exception as e:
+        log.info("anime api failed: %s", e)
+        return None
+
+
+async def dp_bytes(bot, uid):
+    fid = await user_photo_id(bot, uid)
+    if not fid:
+        return None
+    try:
+        return (await bot.download(fid)).read()
+    except Exception:
+        return None
+
+
+def make_card(user_dp, group_dp, name, group, sub, footer):
+    """Welcome card: user DP (left) + group DP (right), neon style."""
+    from PIL import Image, ImageDraw, ImageFont
+    W, H = 1000, 520
+    bg = Image.new("RGB", (W, H))
+    d = ImageDraw.Draw(bg)
+    for y in range(H):
+        t = y / H
+        d.line([(0, y), (W, y)], fill=(int(12 + 30 * t), int(10 + 8 * t), int(30 + 60 * t)))
+    d.rounded_rectangle((14, 14, W - 14, H - 14), radius=28, outline=(0, 240, 255), width=4)
+    d.rounded_rectangle((26, 26, W - 26, H - 26), radius=22, outline=(255, 0, 200), width=2)
+
+    def avatar(data, cx, cy, r, ring, letter):
+        size, im = r * 2, None
+        if data:
+            try:
+                im = Image.open(io.BytesIO(data)).convert("RGB")
+                w, h = im.size
+                m = min(w, h)
+                im = im.crop(((w - m) // 2, (h - m) // 2, (w + m) // 2, (h + m) // 2)).resize((size, size))
+            except Exception:
+                im = None
+        if im is None:
+            im = Image.new("RGB", (size, size), (40, 36, 90))
+            ImageDraw.Draw(im).text((r, r), letter, font=ImageFont.load_default(size=90), fill=(255, 255, 255), anchor="mm")
+        mask = Image.new("L", (size, size), 0)
+        ImageDraw.Draw(mask).ellipse((0, 0, size - 1, size - 1), fill=255)
+        d.ellipse((cx - r - 9, cy - r - 9, cx + r + 9, cy + r + 9), outline=ring, width=6)
+        bg.paste(im, (cx - r, cy - r), mask)
+
+    avatar(user_dp, 150, 260, 100, (0, 240, 255), name[:1].upper() or "?")
+    avatar(group_dp, W - 150, 260, 100, (255, 0, 200), group[:1].upper() or "G")
+    f_big, f_mid, f_sm = (ImageFont.load_default(size=n) for n in (64, 36, 26))
+    d.text((W // 2, 115), "WELCOME", font=f_big, fill=(255, 255, 255), anchor="mm")
+    d.text((W // 2, 235), name, font=f_mid, fill=(0, 240, 255), anchor="mm")
+    d.text((W // 2, 295), "to " + group, font=f_sm, fill=(255, 255, 255), anchor="mm")
+    d.text((W // 2, 345), sub, font=f_sm, fill=(255, 0, 200), anchor="mm")
+    d.text((W // 2, H - 52), footer, font=f_sm, fill=(150, 150, 190), anchor="mm")
+    out = io.BytesIO()
+    bg.save(out, "JPEG", quality=90)
+    return out.getvalue()
+
+
 @on("message", F.new_chat_members)
 async def welcome(message: Message, bot: Bot):
     chat, cfg = message.chat, await get_cfg(bot.id, message.chat.id)
@@ -998,12 +1104,38 @@ async def welcome(message: Message, bot: Bot):
                 f"🔗 {S('username')}  ›  {'@' + u.username if u.username else S('none')}\n"
                 f"🏠 {S('group')}  ›  <b>{esc(chat.title)}</b>\n👥 {S('members')}  ›  <b>{count}</b>\n\n"
                 f"🤖 {S('want your own tag bot? make a clone below')}")
-        cap = wrap("neon", S("welcome"), body)
+        cap = wrap(cfg["theme"], S("welcome"), body)
+        mode, sent = cfg.get("welcome_img", "card"), False
         try:
-            data = await group_photo(bot, chat.id)
-            if data:
-                await bot.send_photo(chat.id, BufferedInputFile(data, "group.jpg"), caption=cap, reply_markup=clone_kb())
-            else:
+            if mode == "anime":
+                url = await anime_url()
+                if url:
+                    try:
+                        if url.lower().endswith(".gif"):
+                            await bot.send_animation(chat.id, url, caption=cap, reply_markup=clone_kb())
+                        else:
+                            await bot.send_photo(chat.id, url, caption=cap, reply_markup=clone_kb())
+                        sent = True
+                    except TelegramAPIError as e:
+                        log.info("anime send failed: %s", e)
+                mode = "card" if not sent else mode
+            if not sent and mode == "card":
+                try:
+                    udp, gdp = await asyncio.gather(dp_bytes(bot, u.id), group_photo(bot, chat.id))
+                    sub = f"ID {u.id}" + (f"   @{u.username}" if u.username else "")
+                    img = await asyncio.to_thread(make_card, udp, gdp, ascii_name(u.first_name, "New Member"), ascii_name(chat.title, "the group", 26), sub, ascii_name(bn(), "Kuku Tag Bot"))
+                    await bot.send_photo(chat.id, BufferedInputFile(img, "welcome.jpg"), caption=cap, reply_markup=clone_kb())
+                    sent = True
+                except TelegramAPIError:
+                    raise
+                except Exception as e:
+                    log.warning("welcome card failed: %s", e)
+            elif not sent and mode == "gdp":
+                data = await group_photo(bot, chat.id)
+                if data:
+                    await bot.send_photo(chat.id, BufferedInputFile(data, "group.jpg"), caption=cap, reply_markup=clone_kb())
+                    sent = True
+            if not sent:
                 await bot.send_message(chat.id, cap, reply_markup=clone_kb())
         except TelegramRetryAfter as e:
             await asyncio.sleep(e.retry_after)
@@ -1017,9 +1149,10 @@ async def left(message: Message, bot: Bot):
     if u.is_bot:
         return
     await db.members.update_one({"bot_id": bot.id, "chat_id": message.chat.id, "user_id": u.id}, {"$set": {"left": True}})
-    if (await get_cfg(bot.id, message.chat.id))["left"]:
+    lcfg = await get_cfg(bot.id, message.chat.id)
+    if lcfg["left"]:
         with contextlib.suppress(TelegramAPIError):
-            await bot.send_message(message.chat.id, wrap("neon", S("goodbye"), f"👋 {ulink(u)} {S('left the group')} 😢\n💔 {S('bye bye, take care')} ✨"))
+            await bot.send_message(message.chat.id, wrap(lcfg["theme"], S("goodbye"), f"👋 {ulink(u)} {S('left the group')} 😢\n💔 {S('bye bye, take care')} ✨"))
 
 
 @on("my_chat_member")
@@ -1047,7 +1180,7 @@ async def bot_status(ev: ChatMemberUpdated, bot: Bot):
                        f"• Time: {now_str()}\n• Total groups: <b>{total}</b>{via}")
         with contextlib.suppress(TelegramAPIError):
             await bot.send_message(chat.id, wrap("neon", S("thanks for adding me"),
-                f"⚡ <b>{S('kuku tag bot')}</b> {S('is ready')}!\n\n🛡 {S('make me admin to tag everyone')}\n⚙️ /settings  •  📖 /start"), reply_markup=clone_kb())
+                f"⚡ <b>{esc(bn())}</b> {S('is ready')}!\n\n🛡 {S('make me admin to tag everyone')}\n⚙️ /settings  •  📖 /start"), reply_markup=clone_kb())
     elif new in (ChatMemberStatus.LEFT, ChatMemberStatus.KICKED):
         await db.groups.update_one({"bot_id": bot.id, "chat_id": chat.id}, {"$set": {"active": False}})
         await send_log(f"➖ <b>Bot Removed From Group</b>\n\n• Group: <b>{esc(chat.title)}</b>\n• ID: <code>{chat.id}</code>\n"
@@ -1072,13 +1205,16 @@ def get_source(message):
         if ids:
             return ("album", r.chat.id, sorted(set(ids)))
         return ("copy", r.chat.id, r.message_id, url_markup(r))
+    if any((message.photo, message.video, message.document, message.animation, message.audio, message.voice)):
+        return ("copy", message.chat.id, message.message_id, url_markup(message), strip_cmd(message.html_text))
     text = strip_cmd(message.html_text)
     return ("text", text) if text else None
 
 
 async def send_source(bot, cid, src):
     if src[0] == "copy":
-        await bot.copy_message(cid, src[1], src[2], reply_markup=src[3])
+        extra = {"caption": src[4]} if len(src) > 4 else {}
+        await bot.copy_message(cid, src[1], src[2], reply_markup=src[3], **extra)
     elif src[0] == "album":
         await bot.copy_messages(cid, src[1], src[2])
     else:
@@ -1228,7 +1364,11 @@ async def ucast(message: Message, bot: Bot):
     p = payload_of(r) if r else (("text", None, strip_cmd(message.html_text)) if strip_cmd(message.html_text) else None)
     if not p:
         return await message.answer("Kisi message par reply karke <code>/ucast</code> likho (text, photo, video, document, audio, voice, GIF, sticker).")
-    if bid_busy := BC.get("ucast"):
+    await run_ucast(bot, message, p)
+
+
+async def run_ucast(bot, message, p):
+    if BC.get("ucast"):
         return await message.answer("⏳ Clone broadcast pehle se chal raha hai.")
     kind, fid, text = p
     media = None
@@ -1280,6 +1420,10 @@ async def ping_cmd(message: Message):
 
 @on("message", Command("stats"), BotOwner())
 async def stats_cmd(message: Message, bot: Bot):
+    await message.answer(await stats_text(bot))
+
+
+async def stats_text(bot):
     bid = bot.id
     up = int(time.time() - START_TIME)
     d, r = divmod(up, 86400)
@@ -1293,7 +1437,7 @@ async def stats_cmd(message: Message, bot: Bot):
     if is_master(bot):
         rows += [f"🤖 {S('clones')}  ›  <b>{await db.clones.count_documents({})}</b> ({len(RT)} running)", f"🛡 {S('sudo')}  ›  <b>{len(SUDO)}</b>"]
     rows.append(f"⏱ {S('uptime')}  ›  <b>{d}d {h}h {r // 60}m</b>")
-    await message.answer(wrap("neon", S("bot stats"), "\n".join(rows)))
+    return wrap("neon", S("bot stats"), "\n".join(rows))
 
 
 async def _id_arg(message):
@@ -1334,10 +1478,14 @@ async def unban_cmd(message: Message, bot: Bot):
 
 @on("message", Command("groups"), BotOwner())
 async def groups_cmd(message: Message, bot: Bot):
+    await message.answer(await groups_text(bot))
+
+
+async def groups_text(bot):
     docs = [d async for d in db.groups.find({"bot_id": bot.id, "active": {"$ne": False}}).limit(60)]
     if not docs:
-        return await message.answer("Abhi koi group nahi.")
-    await message.answer("👥 <b>Groups</b>\n\n" + "\n".join(f"{i}. {esc(d.get('title'))[:30]} — <code>{d['chat_id']}</code>" for i, d in enumerate(docs, 1))[:3900])
+        return "Abhi koi group nahi."
+    return ("👥 <b>Groups</b>\n\n" + "\n".join(f"{i}. {esc(d.get('title'))[:30]} — <code>{d['chat_id']}</code>" for i, d in enumerate(docs, 1))[:3900])
 
 
 @on("message", Command(re.compile(r"^setsupport\d*$")), BotOwner())
@@ -1472,7 +1620,7 @@ async def start_clone(doc):
         await db.clones.update_one({"bot_id": bid}, {"$set": {"status": "invalid"}})
         await bot.session.close()
         return "token invalid ya revoke ho gaya"
-    CTX[bid] = {"master": False, "owner_id": doc["owner_id"], "username": me.username}
+    CTX[bid] = {"master": False, "owner_id": doc["owner_id"], "username": me.username, "name": me.first_name}
     dp = build_dispatcher()
     RT[bid] = {"bot": bot, "dp": dp, "task": asyncio.create_task(_poll(bot, dp, bid))}
     await db.clones.update_one({"bot_id": bid}, {"$set": {"status": "running", "username": me.username, "active": True}})
@@ -1584,15 +1732,19 @@ for _k in ("stop", "start", "delete"):
 # ---- master panel ----
 @on("message", Command("clonelist"), MasterSudo())
 async def clonelist(message: Message):
+    await message.answer(await clonelist_text())
+
+
+async def clonelist_text():
     docs = [d async for d in db.clones.find()]
     if not docs:
-        return await message.answer("Koi clone connected nahi.")
+        return "Koi clone connected nahi."
     out = []
     for d in docs[:40]:
         u = await db.users.count_documents({"bot_id": d["bot_id"]})
         g = await db.groups.count_documents({"bot_id": d["bot_id"], "active": {"$ne": False}})
         out.append(f"🤖 @{esc(d.get('username'))} — {clone_status(d)}\n   👑 {esc(d.get('owner_name'))} (<code>{d['owner_id']}</code>)\n   👤 {u} users • 👥 {g} groups • 📅 {esc(d.get('created'))}")
-    await message.answer(f"<b>Clones ({len(docs)} • {len(RT)} running)</b>\n\n" + "\n\n".join(out))
+    return f"<b>Clones ({len(docs)} • {len(RT)} running)</b>\n\n" + "\n\n".join(out)
 
 
 def _panel_action(kind):
@@ -1621,13 +1773,233 @@ for _k in ("disable", "enable", "del"):
     _REG.append(("message", (Command(f"{_k}clone"), MasterSudo()), _panel_action(_k)))
 
 
+# ═══════════════════════════ OWNER PANEL (buttons) ═══════════════════════════
+AWAIT, PENDING, _alb_busy = {}, {}, set()
+BACK = K([[B("⬅️ Back", "pn:home")]])
+CANCEL = K([[B("❌ Cancel", "pn:cancel")]])
+PROMPTS = {
+    "bc_users": "📣 <b>Broadcast to users</b>\n\nAb apna message bhejo (text, photo, video, link, document, album...). Exact copy jayega.",
+    "bc_groups": "📣 <b>Broadcast to groups</b>\n\nAb apna message bhejo (text, photo, video, link...). Exact copy jayega.",
+    "bc_ucast": "📣 <b>Clone broadcast</b>\n\nAb apna message bhejo (text, photo, video, document, audio, voice, GIF, sticker).",
+    "ban": "🚫 <b>Ban</b>\n\nUser ya group ki ID bhejo.",
+    "unban": "✅ <b>Unban</b>\n\nUser ya group ki ID bhejo.",
+    "addsudo": "➕ <b>Add sudo</b>\n\nUser ki ID bhejo.",
+    "owner": "👑 <b>Owner button</b>\n\nBhejo: <code>@username Owner</code> (ya link / ID)",
+    "support": "💬 <b>Add support button</b>\n\nBhejo: <code>https://t.me/xyz Support Group</code> (link aur naam kisi bhi order me)",
+}
+
+
+def panel_text():
+    return wrap("neon", S("owner panel"), f"👑 <b>{esc(bn())}</b>\n\n👇 {S('choose an option')}")
+
+
+def panel_kb(bot, uid):
+    rows = [[B("📊 Stats", "pn:stats"), B("👥 Groups", "pn:groups")],
+            [B("📣 Broadcast Users", "pn:bc:users"), B("📣 Broadcast Groups", "pn:bc:groups")],
+            [B("💬 Support Buttons", "pn:sup"), B("👑 Owner Button", "pn:owner")],
+            [B("🚫 Ban", "pn:ban"), B("✅ Unban", "pn:unban")],
+            [B("📋 Last Report", "pn:bclog"), B("🏓 Ping", "pn:ping")]]
+    if is_master(bot) and (uid == OWNER_ID or uid in SUDO):
+        rows.append([B("🤖 Clones", "pn:clones"), B("📣 Clone Broadcast", "pn:bc:ucast")])
+    if is_master(bot) and uid == OWNER_ID:
+        rows.append([B("🛡 Sudo List", "pn:sudo"), B("➕ Add Sudo", "pn:addsudo")])
+    rows.append([B("✖️ Close", "pn:close")])
+    return K(rows)
+
+
+async def bclog_text(bot):
+    d = await db.broadcast_logs.find_one({"bot_id": bot.id}, sort=[("time", -1)])
+    if not d:
+        return "Abhi koi broadcast log nahi."
+    reasons = {}
+    for x in d.get("failed_list", []):
+        reasons[x["why"]] = reasons.get(x["why"], 0) + 1
+    rs = "\n".join(f"• {esc(k)}: {v}" for k, v in sorted(reasons.items(), key=lambda a: -a[1])[:8]) or "• none"
+    return f"📋 <b>Last broadcast ({d['kind']})</b>\n\nTotal {d['total']} • ✅ {d['ok']} • 🚫 {d['blocked']} • ❌ {d['failed']}\n\n<b>Failure reasons</b>\n{rs}"
+
+
+async def sup_view(bot):
+    _sup.pop(bot.id, None)
+    links = await get_meta_links(bot.id)
+    items = sorted(((k, v) for k, v in links.items() if k != "owner"), key=lambda x: int(x[0]) if x[0].isdigit() else 0)
+    text = wrap("neon", S("support buttons"), "\n".join(f"#{k}  {esc(v['name'])}" for k, v in items) or "Koi support button nahi.")
+    rows = [[B("➕ Add Button", "pn:supadd")]] + [[B(f"🗑 #{k} {v['name'][:18]}", f"pn:supdel:{k}")] for k, v in items] + [[B("⬅️ Back", "pn:home")]]
+    return text, K(rows)
+
+
+@on("message", Command("panel"), BotOwner())
+async def panel_cmd(message: Message, bot: Bot):
+    if message.chat.type != ChatType.PRIVATE:
+        return await message.answer("🛠 Panel sirf bot ke DM me khulta hai. DM me /panel likho.")
+    await message.answer(panel_text(), reply_markup=panel_kb(bot, message.from_user.id))
+
+
+@on("message", Command("cancel"))
+async def cancel_cmd(message: Message, bot: Bot):
+    if message.from_user:
+        AWAIT.pop((bot.id, message.from_user.id), None)
+        PENDING.pop((bot.id, message.from_user.id), None)
+    await message.answer("❌ Cancel ho gaya.")
+
+
+@on("message", Command("leave"), BotOwner())
+async def leave_cmd(message: Message, bot: Bot, command: CommandObject):
+    try:
+        cid = int((command.args or "").split()[0])
+    except (ValueError, IndexError):
+        return await message.answer("Usage: <code>/leave group_id</code>")
+    try:
+        await bot.leave_chat(cid)
+    except TelegramAPIError as e:
+        return await message.answer(f"❌ {esc(str(e)[:80])}")
+    await db.groups.update_one({"bot_id": bot.id, "chat_id": cid}, {"$set": {"active": False}})
+    await message.answer(f"👋 Left <code>{cid}</code>")
+
+
+@on("callback_query", F.data.startswith("pn:"))
+async def panel_cb(q: CallbackQuery, bot: Bot):
+    uid = q.from_user.id
+    if not is_owner(bot, uid):
+        return await q.answer("⛔ Sirf owner", show_alert=True)
+    parts, key = q.data.split(":"), (bot.id, uid)
+    act = parts[1]
+    msater = is_master(bot) and (uid == OWNER_ID or uid in SUDO)
+    if act == "close":
+        with contextlib.suppress(TelegramAPIError):
+            await q.message.delete()
+    elif act in ("home", "cancel"):
+        AWAIT.pop(key, None)
+        PENDING.pop(key, None)
+        await show(q, panel_text(), panel_kb(bot, uid))
+    elif act == "stats":
+        await show(q, await stats_text(bot), BACK)
+    elif act == "groups":
+        await show(q, await groups_text(bot), BACK)
+    elif act == "bclog":
+        await show(q, await bclog_text(bot), BACK)
+    elif act == "ping":
+        t = time.time()
+        await bot.get_me()
+        return await q.answer(f"🏓 {int((time.time() - t) * 1000)} ms", show_alert=True)
+    elif act == "clones" and msater:
+        await show(q, await clonelist_text(), BACK)
+    elif act == "sudo" and is_master(bot) and uid == OWNER_ID:
+        await show(q, "🛡 <b>Sudo users</b>\n\n" + ("\n".join(f"• <code>{i}</code>" for i in sorted(SUDO)) or "Koi sudo nahi."), BACK)
+    elif act == "bc":
+        kind = "bc_" + parts[2]
+        if kind == "bc_ucast" and not msater:
+            return await q.answer("⛔ Sirf master", show_alert=True)
+        AWAIT[key] = kind
+        await show(q, PROMPTS[kind], CANCEL)
+    elif act in ("ban", "unban", "owner"):
+        AWAIT[key] = act
+        await show(q, PROMPTS[act], CANCEL)
+    elif act == "addsudo" and is_master(bot) and uid == OWNER_ID:
+        AWAIT[key] = act
+        await show(q, PROMPTS[act], CANCEL)
+    elif act == "sup":
+        text, kb = await sup_view(bot)
+        await show(q, text, kb)
+    elif act == "supadd":
+        AWAIT[key] = "support"
+        await show(q, PROMPTS["support"], CANCEL)
+    elif act == "supdel":
+        await db.support_links.delete_one({"bot_id": bot.id, "key": parts[2]})
+        text, kb = await sup_view(bot)
+        await show(q, text, kb)
+    elif act == "go":
+        pend = PENDING.pop(key, None)
+        if not pend:
+            return await q.answer("Expire ho gaya, dobara try karo.", show_alert=True)
+        await q.answer("🚀 Started")
+        if pend["kind"] == "bc_ucast":
+            return await run_ucast(bot, q.message, pend["payload"])
+        src = pend["src"]
+        return await run_broadcast(bot, q.message, lambda cid: send_source(bot, cid, src), await _targets(bot.id, pend["kind"][3:]), pend["kind"][3:], pend["kind"][3:])
+    await q.answer()
+
+
+class Awaiting(BaseFilter):
+    async def __call__(self, message: Message, bot: Bot) -> bool:
+        return message.chat.type == ChatType.PRIVATE and bool(message.from_user) and (bot.id, message.from_user.id) in AWAIT
+
+
+@on("message", Awaiting())
+async def awaiting(message: Message, bot: Bot):
+    uid, key = message.from_user.id, (bot.id, message.from_user.id)
+    kind = AWAIT.get(key)
+    if not is_owner(bot, uid):
+        AWAIT.pop(key, None)
+        return
+    text = (message.text or "").strip()
+    if kind in ("ban", "unban", "addsudo"):
+        m = re.search(r"-?\d+", text)
+        if not m:
+            return await message.answer("❌ ID number bhejo.", reply_markup=CANCEL)
+        i = int(m.group())
+        AWAIT.pop(key, None)
+        if kind == "ban":
+            if i in (OWNER_ID, CTX[bot.id]["owner_id"]):
+                return await message.answer("😅 Owner ko ban nahi kar sakte.")
+            await db.banned_users.update_one({"bot_id": bot.id, "target_id": i}, {"$set": {"ok": True}}, upsert=True)
+            _bans.setdefault(bot.id, set()).add(i)
+            return await message.answer(f"🚫 Banned: <code>{i}</code>", reply_markup=BACK)
+        if kind == "unban":
+            await db.banned_users.delete_one({"bot_id": bot.id, "target_id": i})
+            _bans.setdefault(bot.id, set()).discard(i)
+            return await message.answer(f"✅ Unbanned: <code>{i}</code>", reply_markup=BACK)
+        if uid != OWNER_ID or not is_master(bot):
+            return await message.answer("⛔ Sirf master owner.")
+        SUDO.add(i)
+        await db.sudo.update_one({"user_id": i}, {"$set": {"ok": True}}, upsert=True)
+        await setup_menus(bot)
+        return await message.answer(f"✅ Sudo added: <code>{i}</code>", reply_markup=BACK)
+    if kind in ("owner", "support"):
+        url, name = split_link_name(text.split())
+        if not url:
+            return await message.answer("❌ Link galat hai. https://..., t.me/..., @username ya ID do.", reply_markup=CANCEL)
+        AWAIT.pop(key, None)
+        if kind == "owner":
+            await db.support_links.update_one({"bot_id": bot.id, "key": "owner"}, {"$set": {"url": url, "name": (name or "👑 Owner")[:40]}}, upsert=True)
+            _sup.pop(bot.id, None)
+            return await message.answer("✅ Owner button set ho gaya.", reply_markup=BACK)
+        used = {k for k in (await get_meta_links(bot.id)) if k != "owner"}
+        num = next(str(n) for n in range(1, 100) if str(n) not in used)
+        await db.support_links.update_one({"bot_id": bot.id, "key": num}, {"$set": {"url": url, "name": (name or f"💬 Support {num}")[:40]}}, upsert=True)
+        text2, kb = await sup_view(bot)
+        return await message.answer("✅ Button add ho gaya.\n\n" + text2, reply_markup=kb)
+    # broadcast kinds
+    if kind == "bc_ucast":
+        p = payload_of(message)
+        if not p:
+            return await message.answer("❌ Ye type supported nahi. Text, photo, video, document, audio, voice, GIF ya sticker bhejo.", reply_markup=CANCEL)
+        AWAIT.pop(key, None)
+        PENDING[key] = {"kind": kind, "payload": p}
+        return await message.reply(f"✅ Ye message {len(RT)} running clone(s) ke users ko bhejna hai?", reply_markup=K([[B("✅ Send", "pn:go"), B("❌ Cancel", "pn:cancel")]]))
+    if message.media_group_id:
+        gk = (message.chat.id, message.media_group_id)
+        if gk in _alb_busy:
+            return
+        _alb_busy.add(gk)
+        await asyncio.sleep(1.5)
+        ids = sorted(set(ALBUMS.get(gk, [message.message_id])))
+        _alb_busy.discard(gk)
+        src = ("album", message.chat.id, ids)
+    else:
+        src = ("copy", message.chat.id, message.message_id, url_markup(message))
+    AWAIT.pop(key, None)
+    PENDING[key] = {"kind": kind, "src": src}
+    n = len(await _targets(bot.id, kind[3:]))
+    await message.reply(f"✅ Ye message {n} {kind[3:]} ko bhejna hai?", reply_markup=K([[B(f"✅ Send ({n})", "pn:go"), B("❌ Cancel", "pn:cancel")]]))
+
+
 # ═══════════════════════════ COMMAND MENUS ═══════════════════════════
 USER_CMDS = [("start", "Start the bot"), ("help", "Commands guide"), ("settings", "Group settings"), ("all", "Tag everyone"), ("admins", "Tag admins"),
              ("anybody", "Tag a random member"), ("gmtag", "Good morning tag"), ("gntag", "Good night tag"), ("vctag", "VC invite tag"),
              ("tagall", "Fun tag, one by one"), ("stop", "Stop tagging"), ("unreg", "Leave tag list"), ("reg", "Join tag list again"),
              ("id", "Show your ID"), ("optout", "Stop DM broadcasts")]
 CLONE_CMDS = [("clone", "Create your own bot"), ("myclones", "Your clones")]
-OWNER_CMDS = [("stats", "Bot stats"), ("broadcast", "Broadcast to users"), ("gcast", "Broadcast to groups"), ("bclog", "Last broadcast report"),
+OWNER_CMDS = [("panel", "Owner panel (buttons)"), ("leave", "Leave a group"), ("cancel", "Cancel action"), ("stats", "Bot stats"), ("broadcast", "Broadcast to users"), ("gcast", "Broadcast to groups"), ("bclog", "Last broadcast report"),
               ("ban", "Ban user/group"), ("unban", "Unban"), ("groups", "List groups"), ("ping", "Check speed"),
               ("setsupport", "Set support button"), ("delsupport", "Delete support button"), ("supports", "List buttons"), ("setowner", "Set owner button")]
 MASTER_CMDS = [("ucast", "Broadcast to clone users"), ("clonelist", "All clones"), ("disableclone", "Disable a clone"), ("enableclone", "Enable a clone"), ("delclone", "Delete a clone")]
@@ -1661,7 +2033,7 @@ async def main():
     MASTER = Bot(BOT_TOKEN, default=DEFAULT)
     me = await MASTER.get_me()
     MASTER_UN = me.username
-    CTX[me.id] = {"master": True, "owner_id": OWNER_ID, "username": me.username}
+    CTX[me.id] = {"master": True, "owner_id": OWNER_ID, "username": me.username, "name": me.first_name}
     await db.tag_sessions.update_many({"status": "running"}, {"$set": {"status": "interrupted"}})  # no duplicate resume after restart
     dp = build_dispatcher()
     await setup_menus(MASTER)
